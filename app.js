@@ -16,10 +16,10 @@
   function plural(n){ const a=n%10,b=n%100; return n+' '+((b>10&&b<15)?'карточек':a===1?'карточка':(a>1&&a<5)?'карточки':'карточек'); }
 
   // ---------- API ----------
-  async function api(path, method, body){
+  async function serverApi(path, method, body){
     let r;
     try{
-      r = await fetch('/api'+path, {
+      r = await fetch('api'+path, {
         method: method||'GET',
         headers: {'Content-Type':'application/json'},
         body: body ? JSON.stringify(body) : undefined
@@ -33,6 +33,68 @@
     return r.status===204 ? null : r.json();
   }
   function toLocal(m){ return {id:m.id, title:m.title, cards:m.cards.map(c=>({t:c.term,d:c.definition}))}; }
+
+  // ---------- режим хранения ----------
+  // 'server' — Python + SQLite (server.py).
+  // 'local'  — всё в localStorage браузера: так страница работает на GitHub Pages
+  //            или при открытии index.html двойным кликом (данные только в этом браузере).
+  let mode = null;
+  async function init(){
+    if(mode) return;
+    try{
+      const r = await fetch('api/modules');
+      const ct = r.headers.get('content-type') || '';
+      mode = (r.ok && ct.includes('json')) ? 'server' : 'local';
+    }catch(e){ mode = 'local'; }
+  }
+  const LS_KEY = 'qz_modules_v1';
+  function lsRead(){
+    try{ const d=JSON.parse(localStorage.getItem(LS_KEY)); if(d && Array.isArray(d.modules)) return d; }catch(e){}
+    return {next:1, modules:[]};
+  }
+  function lsWrite(d){
+    try{ localStorage.setItem(LS_KEY, JSON.stringify(d)); }
+    catch(e){ throw new Error('Не удалось сохранить в браузере (хранилище недоступно или переполнено)'); }
+  }
+  function lsValidate(b){
+    const title = clean(String((b && b.title) || ''));
+    if(!title) throw new Error('Введите название модуля');
+    if(title.length>200) throw new Error('Название слишком длинное (максимум 200 символов)');
+    const cards = ((b && b.cards) || [])
+      .map(c=>({term:clean(String(c.term||'')), definition:clean(String(c.definition||''))}))
+      .filter(c=>c.term && c.definition);
+    if(!cards.length) throw new Error('Не найдено ни одной корректной карточки');
+    return {title, cards};
+  }
+  async function localApi(path, method, body){
+    const m = path.match(/^\/modules(?:\/(\d+))?$/);
+    if(!m) throw new Error('Не найдено');
+    const id = m[1] ? +m[1] : null;
+    const d = lsRead();
+    const ts = new Date().toISOString();
+    method = method || 'GET';
+    if(id===null){
+      if(method==='GET') return d.modules.slice()
+        .sort((a,b)=>b.updated_at.localeCompare(a.updated_at) || b.id-a.id)
+        .map(x=>({id:x.id, title:x.title, updated_at:x.updated_at, cards_count:x.cards.length}));
+      if(method==='POST'){
+        const v=lsValidate(body);
+        const mod={id:d.next++, title:v.title, created_at:ts, updated_at:ts, cards:v.cards};
+        d.modules.push(mod); lsWrite(d); return mod;
+      }
+    } else {
+      const mod=d.modules.find(x=>x.id===id);
+      if(!mod) throw new Error('Модуль не найден');
+      if(method==='GET') return mod;
+      if(method==='PUT'){
+        const v=lsValidate(body);
+        mod.title=v.title; mod.cards=v.cards; mod.updated_at=ts; lsWrite(d); return mod;
+      }
+      if(method==='DELETE'){ d.modules=d.modules.filter(x=>x.id!==id); lsWrite(d); return null; }
+    }
+    throw new Error('Метод не поддерживается');
+  }
+  function api(path, method, body){ return mode==='local' ? localApi(path,method,body) : serverApi(path,method,body); }
 
   // ---------- парсинг ----------
   function parse(text){
@@ -50,6 +112,7 @@
 
   // ---------- роутинг ----------
   async function route(){
+    await init();
     if(L && L.timer) clearTimeout(L.timer);
     L=null;
     const h = location.hash.replace(/^#/,'') || '/';
@@ -82,7 +145,9 @@
     let list;
     try{ list=await api('/modules'); }catch(e){ return showError(e); }
     app.innerHTML =
-      '<div class="top"><div><h2>Мои модули</h2><p class="sub">Все модули и карточки хранятся в базе данных.</p></div>'+
+      '<div class="top"><div><h2>Мои модули</h2><p class="sub">'+(mode==='local'
+        ? 'Модули хранятся в этом браузере: на другом устройстве или в другом браузере их не будет.'
+        : 'Все модули и карточки хранятся в базе данных.')+'</p></div>'+
       '<a class="btn" href="#/new">+ Новый модуль</a></div>'+
       (list.length
         ? '<div class="grid">'+list.map(m=>'<a class="mod" href="#/m/'+m.id+'/cards"><div class="mt">'+esc(m.title)+'</div><div class="mc">'+plural(m.cards_count)+'</div></a>').join('')+'</div>'
